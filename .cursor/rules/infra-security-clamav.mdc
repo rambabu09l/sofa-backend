@@ -1,0 +1,69 @@
+---
+description: ClamAV malware scanning via src/infra/security/clamAv — when and how to scan uploads
+globs: src/infra/security/**/*.ts,src/modules/**/*upload*.ts,src/modules/**/document/**/*.ts
+alwaysApply: false
+---
+
+# ClamAV / upload malware scanning
+
+ClamAV lives under `src/infra/security/clamAv/` (`ClamAvModule`, `ClamAvService`, `clamav-client`, `types/`), exported through the global `SecurityModule`. Inject `ClamAvService` from business modules; never talk to clamd sockets from controllers.
+
+Layout (same pattern as `mail/`):
+
+```
+src/infra/security/
+  security.module.ts      # @Global SecurityModule — aggregates security layers
+  clamAv/
+    clamav.module.ts      # ClamAvModule
+    clamav.service.ts     # Nest service — try/catch + rethrowServiceError
+    clamav-client.ts      # pure clamd TCP transport (no Nest DI)
+    types/clamav.types.ts
+    tests/clamav-client.spec.ts
+    tests/clamav.service.spec.ts
+```
+
+## Document upload pipeline (quarantine then async)
+
+Ticket documents use **private MinIO quarantine + Kafka async scan** (not BullMQ):
+
+1. `DocumentService.presign` validates name/extension/MIME/size and issues a quarantine PUT URL.
+2. Client uploads bytes to MinIO quarantine.
+3. `DocumentService.complete` verifies the object, sets `SCANNING`, publishes Kafka `sofa.document.scan`.
+4. `DocumentScanConsumer` → `DocumentScanService.processScan`: magic-byte check + `ClamAvService.scanBuffer`.
+5. Clean → copy to `accepted/` prefix, set `ACCEPTED`, store SHA-256.
+6. Infected / invalid → `REJECTED`, delete object.
+7. Scanner error while `CLAMAV_ENABLED=true` → `SCAN_FAILED` (retry via Kafka until `DOCUMENT_SCAN_MAX_ATTEMPTS`); **never** treat as `ACCEPTED`.
+8. `download` and capture linking only allow `ACCEPTED`.
+
+Do not modify or repair file bytes (no CDR).
+
+## Sync fail-closed (non-document paths)
+
+Any other path that accepts user file bytes directly (multer temp file / buffer) must call `scanFile` or `scanBuffer` **before** persisting as trusted content. The controller-facing business service owns the policy:
+
+```ts
+const scan = await this.clamav.scanFile(tempPath);
+if (!scan.ok) {
+  if (scan.infected) {
+    throw new HttpException(
+      `Virus detected: ${scan.signature}`,
+      HttpStatus.BAD_REQUEST,
+    );
+  }
+  if (this.clamav.enabled) {
+    throw new HttpException(
+      'Malware scan is temporarily unavailable. Try again shortly.',
+      HttpStatus.SERVICE_UNAVAILABLE,
+    );
+  }
+}
+```
+
+- Infected → `400` with signature in the message (`HttpException`, not subclasses).
+- Scanner error while `CLAMAV_ENABLED=true` → `503` (do not accept the file).
+- `CLAMAV_ENABLED=false` → service skips scan and returns `{ ok: true }` (local only).
+
+## Health and docker
+
+- Readiness includes ClamAV via `src/infra/health/clamav.health.ts` (`GET /health/ready`). `SecurityModule` is global — do not re-import it in `HealthModule` (same as Redis / Storage / Kafka).
+- Docker: `clamav` service in `docker-compose.yml` (port `CLAMAV_PORT`, volume `sofa_clamav`). First boot can take 2–3 minutes while signatures download.

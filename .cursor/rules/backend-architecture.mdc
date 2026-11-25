@@ -1,0 +1,44 @@
+---
+description: Backend layering, module boundaries, and entity ownership for the NestJS API
+alwaysApply: true
+---
+
+# Backend architecture
+
+NestJS + TypeORM (MySQL), Redis, SuperTokens (EmailPassword + Session via `supertokens-node` / `supertokens-nestjs`), ClamAV, MinIO (S3), Kafka, Swagger. One database (no per-tenant DB). Workspace membership is the access boundary.
+
+## Layers (no DataService)
+
+`Controller -> Service -> Repository -> Database`
+
+| Layer | Allowed | Never |
+|---|---|---|
+| Controller | Inject services of **its own module**. Decorators, DTOs, Swagger. | Repositories, another module's service, business logic, try/catch |
+| Service | Business rules, access checks, mappers, try/catch, `Logger`. Inject **own** repositories + **other modules' services**. | `@InjectRepository`, `Repository<Entity>`, another module's repository or entity table |
+| Repository | `@Injectable()` class extending `Repository<Entity>`. Queries only. | Business rules, HTTP exceptions, other modules' tables |
+| Mapper | Pure functions entity <-> DTO | DB or service calls |
+
+## Module boundaries
+
+- Each entity is registered in `TypeOrmModule.forFeature` by **exactly one** module (its owner).
+- Need another module's data? Call **that module's service** (add a method there if missing). Module exports its services only, never repositories.
+- Circular imports: `forwardRef(() => XModule)` on the module and `@Inject(forwardRef(() => XService))` in the constructor.
+- These modules form one import cycle: `cursor-usage`, `estimation`, `workspace-estimation`, `knowledge-base`, `project-chat`, `project-members`, `projects`, `source`, `sow`, `users`, `workspaces`. Any module (except `AppModule`) that imports one of them uses `forwardRef(() => ...)`, and services injected across that group use `@Inject(forwardRef(...))`. Missing one shows up at boot as `UndefinedModuleException` or "Nest can't resolve dependencies ... at index [n]".
+- A module never re-exports another module (`exports: [OtherModule]`). Importers import the owner directly.
+- Documented exception: `permissions` (global, backs `PermissionsGuard`) has one **read-only** `AccessReadRepository` over users, projects, and project memberships, using `dataSource.getRepository`. Nothing else gets an exception.
+
+## Platform code (not business modules)
+
+`src/infra/` (`redis`, `mail`, `queue`, `health`, `security`, `storage`, `kafka`) plus `src/config` (includes SuperTokens `appInfo` / module options), `src/database`, `src/common`. Business modules (`src/modules/*`) may inject their services directly. Infra never imports from `src/modules/`. SuperTokens Core is self-hosted (Compose); Nest talks to it only via `SUPERTOKENS_CONNECTION_URI` + API key — never expose Core to browsers.
+
+```ts
+// BAD - workspaces reading projects table
+@InjectRepository(ProjectEntity) private readonly projects: Repository<ProjectEntity>
+
+// GOOD
+@Inject(forwardRef(() => ProjectsService)) private readonly projects: ProjectsService
+```
+
+Multi-catalog modules such as `masters` segregate by feature subdomain (`role/`, `permission/`, …) under one Nest module — see `backend-module-structure.mdc`.
+
+See also: `backend-module-structure.mdc`, `backend-errors.mdc`, `backend-api-conventions.mdc`, `backend-data-access.mdc`.

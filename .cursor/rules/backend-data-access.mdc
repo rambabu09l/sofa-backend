@@ -1,0 +1,74 @@
+---
+description: Repositories, entities, transactions, soft delete, migrations, and async ordering in the backend
+globs: src/**/repository/*.ts,src/**/entity/*.ts,src/**/service/*.ts,src/**/*.module.ts,src/database/**/*.ts
+alwaysApply: false
+---
+
+# Data access
+
+## Repositories
+
+One class per entity, in the owning module's `repository/` folder, extending TypeORM `Repository`:
+
+```ts
+@Injectable()
+export class ProjectRepository extends Repository<ProjectEntity> {
+  /** `manager` is set when TypeORM rebinds via `EntityManager.withRepository`. */
+  constructor(dataSource: DataSource, manager?: EntityManager) {
+    super(ProjectEntity, manager ?? dataSource.createEntityManager());
+  }
+
+  findActiveInWorkspace(workspaceId: string) {
+    return this.find({ where: { workspaceId, archivedAt: IsNull() }, order: { name: 'ASC' } });
+  }
+}
+```
+
+- Keep the optional `manager` constructor parameter. `manager.withRepository(repo)` calls `new repo.constructor(target, manager)`; without it the rebound repository silently runs outside the transaction.
+- Register the entity in the owning module's `TypeOrmModule.forFeature([...])` and add the repository to that module's `providers`. Never export repositories.
+- Ownership examples that are easy to get wrong: `EstimationMasterEntity` belongs to `workspace-estimation` (estimation reads it through `WorkspaceEstimationService`); `UserProjectEntity` belongs to `project-members`.
+- Services inject `ProjectRepository`, never `@InjectRepository(...)` / `Repository<ProjectEntity>`, and never `dataSource.getRepository(...)`.
+- Put non-trivial queries (query builders, joins, aggregates) in named repository methods.
+
+## Transactions
+
+```ts
+await this.projects.manager.transaction(async (manager) => {
+  const projects = manager.withRepository(this.projects);
+  await projects.save(project);
+  await this.workspaces.ensureMember(workspaceId, userId, role, manager);
+});
+
+// other module's service
+async ensureMember(workspaceId: string, userId: string, role: WorkspaceRole, manager?: EntityManager) {
+  const members = manager ? manager.withRepository(this.members) : this.members;
+  ...
+}
+```
+
+- Start transactions in the service, via `this.ownRepo.manager.transaction(...)` (or an injected `DataSource`).
+- Own tables: `manager.withRepository(this.xRepo)`. `manager.save(OwnEntity, ...)` is fine for entities your module owns. Never `manager.getRepository(OtherModuleEntity)`.
+- Other modules' tables: call their service and pass `manager`. Service methods that may run inside a caller's transaction take an optional last parameter `manager?: EntityManager`.
+
+## Entities
+
+- Every entity extends `BaseEntity` (`src/database/entities/base.entity.ts`), including join/mapping tables with composite keys. It provides `createdAt`, `updatedAt`, `deletedAt` (nullable `DATETIME(3)`, defaulting to `CURRENT_TIMESTAMP(3)`) and `createdBy`, `updatedBy`, `deletedBy` (nullable `CHAR(36)` holding `users.id`). Never redeclare these columns on an entity. Primary keys stay on each entity.
+- Services set `createdBy` on insert, `updatedBy` on update, and `deletedBy` before `softRemove` / `softDelete`, using the current user's id.
+- Declare uniqueness and indexes on the entity (`@Index('uq_…', { unique: true })`, `@Index('ix_…', ['colA', 'colB'])`) whenever the schema needs them — unique business keys (`code`), reverse FK lookups on mapping tables, and common list filters (`scope` + `isActive`). Pair every change with a migration.
+- Schema changes need a migration in `src/database/migrations/` (`npm run migration:generate`). Never rely on `synchronize`. Ask the user before any schema change — see `database-changes-and-migrations.mdc`.
+- Deletes are soft: `softDelete` / `softRemove`. Normal finds exclude soft-deleted rows; use `withDeleted` only for restore flows.
+
+## Async ordering
+
+- Database calls whose order or failure matters: run them in sequence with `await`, not `Promise.all`. Never put a database call inside a loop; see `backend-no-queries-in-loops.mdc` and use a batch save, `IN` query, or `UPDATE ... CASE` instead.
+- Allowed: intentional bounded concurrency for LLM or image generation (estimation waves, slide images), presigned-URL fan-out, pure in-memory document builders (estimation export), and independent read-only lookups that feed one response (project chat context).
+
+```ts
+// BAD
+await Promise.all(members.map((m) => repo.save(m)));
+for (const member of members) {
+  await repo.save(member);
+}
+// GOOD
+await repo.save(members);
+```

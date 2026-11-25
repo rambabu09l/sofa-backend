@@ -1,0 +1,60 @@
+---
+description: Team coding standards for backend services - types, constants, enums, try/catch, activity logging, no Promise.all, no queries in loops
+alwaysApply: true
+---
+
+# Backend coding standards
+
+These rules apply to every file under `src/`. Where an older rule in this folder says otherwise, this file wins (see "Overrides" at the end).
+
+## Code organization
+
+- **Types** (`type`, `interface`) live in the module's `types/` folder, for example `types/ticket-custom-field.types.ts`. Do not declare types inside service, controller, repository, mapper, or helper files.
+- **Constants** (limits, lengths, patterns, default codes, repeated messages) live in the module's `constants/` folder, for example `constants/ticket-custom-field.constants.ts`. Do not hardcode numbers or repeat message strings in services, DTOs, or helpers. Entity column lengths must match the migration, so they may stay as literals.
+- **Enums** live in the module's `enum/` folder, named per `backend-module-structure.mdc`. Do not declare enums or string-literal unions for status, type, or mode codes inline.
+- Keep each responsibility in its own file: controller, service, repository, mapper, helper, types, constants, enum.
+- Logic repeated in a second place moves to one shared file in the module.
+- **STRICT for services:** never declare `type` / `interface` / `enum` / module-level `const` inside `*.service.ts`. See `backend-no-types-in-services.mdc`.
+
+## Naming and clean code
+
+- Names say what the thing is. Avoid unclear abbreviations.
+- Comments explain why, not what.
+
+## Error handling
+
+- Every `async` service method, including private helpers and one-line delegations, wraps its body in `try/catch` and ends with `rethrowServiceError(...)` from `src/common/http/service-error.ts`.
+- Expected failures throw `HttpException` with an explicit status and one plain sentence the user can act on.
+- Never silently ignore an exception: no empty `catch {}`, and no fallback that hides a failure. If a fallback is intentional, log it with a reason.
+
+```ts
+async update(scope: ProjectScope, fieldId: string, dto: UpdateTicketCustomFieldDto): Promise<TicketCustomFieldResponseDto> {
+  try {
+    this.logger.debug(
+      `User ${scope.userId} is updating custom field ${fieldId} in project ${scope.projectId} with body ${JSON.stringify(redactSecrets(dto))}`,
+    );
+    // ... business logic ...
+  } catch (error) {
+    rethrowServiceError(error, this.logger, `TicketCustomFieldService.update fieldId=${fieldId} userId=${scope.userId}`, 'Could not update the custom field');
+  }
+}
+```
+
+## Service logging
+
+- The first statement inside every service method's `try` is an activity log at `debug` level. It states what the user is trying to do, the user id, the target ids, and the request body.
+- Public service methods log the request body as sent by the client, with secret fields redacted: `password`, `token`, `secret`, `otp`, `apiKey`, `refreshToken`, and invite tokens. Never log a secret value.
+- Private helpers have no request body of their own. They log their action and ids instead.
+
+## Async work and database access
+
+- Never use `Promise.all()`. Run async work one step after another with `await`.
+- Never run a database query inside a loop. For many rows, use one bulk operation: `save(array)`, `In([...])`, a single `find` with relations, a grouped query, or a query builder. Build lookups in memory with a `Map`.
+- Loops over data already in memory are fine. Only the database call must stay out of the loop.
+- Independent steps that each need one query run one after another with `await`, not in a loop.
+
+## Overrides of older rules in this folder
+
+- `backend-errors.mdc`: "Private helpers do not need their own try/catch" is replaced by the mandatory rule above. "Never log full request bodies" is replaced by the redacted body log above.
+- `backend-data-access.mdc`: the "Async ordering" section that allows `for ... of` loops with `await` around per-row database writes is replaced by the bulk-operation rule above. The `Promise.all` exceptions listed there no longer apply.
+- `backend-module-structure.mdc`: `types/` and `constants/` folders are required in any module that has types or constants, not only the auth module.

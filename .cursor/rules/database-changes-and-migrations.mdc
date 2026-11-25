@@ -1,0 +1,52 @@
+---
+description: Ask before any schema change; all schema changes go through tracked TypeORM migrations
+alwaysApply: true
+---
+
+# Database Changes & Migrations
+
+## 1. Ask first — never change the schema without approval
+
+Before writing or running anything that does `CREATE TABLE`, `ALTER TABLE`, `DROP` (table/column/index),
+`RENAME`, `TRUNCATE`, or changes an entity's columns/relations, **stop and ask the user**. Include:
+
+- What will change (tables, columns, types, indexes, constraints)
+- Why it is needed
+- Impact on existing data (data loss? backfill? nullable vs default?)
+- The proposed migration SQL (`up` and `down`)
+
+Only implement after explicit confirmation. This includes editing `*.entity.ts` files in ways that alter the schema.
+
+## 2. Every schema change is a tracked migration
+
+- Migrations live in `src/database/migrations/`.
+- Applied migrations are recorded in the `typeorm_migrations` table (`migrationsTableName` in `src/database/typeorm.options.ts`). Never edit that table by hand.
+- Never rely on `synchronize` (`MYSQL_SYNC`) for real schema changes, and never run raw DDL directly against the DB.
+- Never edit a migration that has already been applied; write a new one.
+- File and class names: `<timestamp>-<PascalCaseDescription>.ts`, e.g. `1760000002000-AddTicketsTable.ts` with class `AddTicketsTable1760000002000`.
+- Every migration has a working `down()` that fully reverses `up()`.
+- Use snake_case table/column names (the project uses `SnakeNamingStrategy`) and index names like `ix_<table>_<cols>`.
+
+```bash
+npm run migration:create   # empty migration, then rename ChangeMe
+npm run migration:generate # diff from entities, then rename ChangeMe
+npm run migration:show     # list applied / pending
+npm run migration:run
+npm run migration:revert
+```
+
+## 3. Every table carries the audit columns
+
+Every entity, including join/mapping tables, extends `BaseEntity` (`src/database/entities/base.entity.ts`).
+A `CREATE TABLE` in a migration must include these columns:
+
+```sql
+created_at DATETIME(3) NULL DEFAULT CURRENT_TIMESTAMP(3),
+updated_at DATETIME(3) NULL DEFAULT CURRENT_TIMESTAMP(3) ON UPDATE CURRENT_TIMESTAMP(3),
+deleted_at DATETIME(3) NULL,
+created_by CHAR(36) NULL,
+updated_by CHAR(36) NULL,
+deleted_by CHAR(36) NULL
+```
+
+`*_by` columns hold `users.id` (UUID) with no foreign key. Don't redeclare these columns on the entity.

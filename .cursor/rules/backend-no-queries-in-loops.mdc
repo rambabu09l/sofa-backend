@@ -1,0 +1,51 @@
+---
+description: No database reads or writes inside loops; use batch saves, bulk updates, and IN queries
+globs: src/**/*.ts
+alwaysApply: false
+---
+
+# No database queries in loops
+
+Never call the database (repository methods, `manager.*`, `QueryBuilder`, `dataSource.query`, or any service that queries) once per item inside a loop. A loop of N queries becomes N round trips and a slow request. This includes `for`, `for ... of`, `while`, `forEach`, and `map` with `await` inside.
+
+## Use one query instead
+
+- **Insert many rows:** build the entities and save the array once.
+
+```ts
+// BAD
+for (const master of masters) {
+  saved.push(await types.save(types.create({ ...toRow(master) })));
+}
+
+// GOOD
+return types.save(masters.map((master) => types.create({ ...toRow(master) })));
+```
+
+- **Update many rows to different values:** one `UPDATE ... CASE`. Put it in a named repository method (see `backend-data-access.mdc`).
+
+```ts
+// BAD
+for (const item of dto.items) {
+  await types.update({ id: item.id, organizationId }, { sortOrder: item.sortOrder });
+}
+
+// GOOD (repository method)
+await types.updateSortOrders(organizationId, dto.items, userId);
+```
+
+- **Read many rows:** one `find` with `In(ids)` (or `IN (:...ids)`), then look up in memory with a `Map`.
+- **Update many rows to the same value:** one `update({ id: In(ids) }, { ... })`.
+
+## What is not allowed
+
+- Not inside a loop, even inside a transaction. A transaction does not make a loop of queries acceptable.
+- Not `Promise.all` over repository calls as a workaround. That still issues N queries.
+
+## If a loop seems required
+
+Check first whether a batch save, `IN` query, or `CASE` update covers it. If you still think a per-item query is needed, stop and ask the user before writing it, and explain why one query can't work.
+
+## Not covered
+
+- Loops over in-memory data, HTTP calls to other services, and LLM or image generation are not database queries and are not covered by this rule.

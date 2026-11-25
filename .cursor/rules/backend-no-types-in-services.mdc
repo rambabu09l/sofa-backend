@@ -1,0 +1,54 @@
+---
+description: STRICT — never declare types, constants, or enums inside service files
+globs: "**/service/**/*.ts"
+alwaysApply: true
+---
+
+# No types / constants / enums in services
+
+Service files contain **business logic only**. Declaring `type`, `interface`, `enum`, or module-level `const` in a `*.service.ts` file is forbidden.
+
+## Required locations
+
+| Kind | Put it here |
+|---|---|
+| `type` / `interface` | `<feature>/types/<feature>.types.ts` |
+| `enum` | `<feature>/enum/<feature>.enums.ts` (or existing enum file) |
+| Constants / default objects | `<feature>/constants/<feature>.constants.ts` |
+| Pure transforms of those types | `<feature>/helpers/*.helper.ts` |
+
+## Wrong
+
+```ts
+// ❌ foo.service.ts
+type ProjectScope = { organizationId: string; projectId: string; userId: string };
+const LIST_LIMIT = 4;
+enum Mode { A = 'A' }
+
+@Injectable()
+export class FooService { /* ... */ }
+```
+
+## Right
+
+```ts
+// types/foo.types.ts
+export type ProjectScope = { organizationId: string; projectId: string; userId: string };
+
+// constants/foo.constants.ts
+export const LIST_LIMIT = 4;
+
+// foo.service.ts
+import { LIST_LIMIT } from '../constants/foo.constants';
+import type { ProjectScope } from '../types/foo.types';
+```
+
+## Hard rules
+
+- Do **not** export types from a service for other modules to import. Export from `types/` instead.
+- Do **not** leave file-local `type` aliases at the top of a service "just for this file".
+- Props-like input shapes for private methods still belong in `types/`.
+- Specs may keep local fixtures; production `service/*.ts` may not.
+- When touching a service that still has inline types/constants/enums, **move them in the same change** before adding logic.
+
+This rule overrides any looser wording elsewhere. Prefer this file when in conflict with older examples that showed inline types in services.

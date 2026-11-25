@@ -1,0 +1,39 @@
+---
+description: SRP, SOLID, and production-grade readability for backend TypeScript
+globs: src/**/*.ts
+alwaysApply: false
+---
+
+# SRP, SOLID, and readable production code
+
+## Single responsibility
+
+- One file, one reason to change. Split factories, mappers, transport adapters, and types.
+- Functions do one thing; name them after that thing (`mapPromptToOpenAiMessages`, not `prepare`).
+- Prefer a thin orchestrator that calls focused helpers over a god class.
+
+## SOLID (practical)
+
+- **S** — Keep modules small; extract when a unit mixes mapping, I/O, and policy.
+- **O** — Add behavior via new helpers/adapters; avoid growing `if` trees in the entrypoint.
+- **L** — Implement published contracts (e.g. AI SDK `LanguageModel`) without surprising callers.
+- **I** — Depend on narrow ports (`complete(...)`), not fat Nest services, when only one method is needed.
+- **D** — Callers inject the port; helpers stay free of Nest DI unless DI is the product.
+
+## Production grade
+
+- Validate config at the boundary; fail fast with clear errors.
+- Preserve abort/`AbortSignal` end to end; merge caller + call-site signals when both exist.
+- Map unsupported features to SDK warnings or `UnsupportedFunctionalityError` — never silent drop of required behavior.
+- Unit-test helpers in isolation with mocked ports; mirror paths under `tests/`.
+- Public barrels export only the intended API; keep internals private to the folder.
+
+```typescript
+// ❌ BAD — domain calls provider HTTP or hand-rolled doGenerate
+await openAi.complete({ ... });
+await fetch(`${baseUrl}/chat/completions`, { ... });
+
+// ✅ GOOD — AI SDK model + generate helpers; infra only as fetch/scrub
+createLanguageModel({ rateLimiter, config });
+await generateText({ model, prompt }); // via helpers/generate when ready
+```

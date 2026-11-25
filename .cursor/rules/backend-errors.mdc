@@ -1,0 +1,38 @@
+---
+description: Try/catch, HTTP exceptions, user-facing error messages, and logging in backend services
+globs: src/**/*.ts
+alwaysApply: false
+---
+
+# Error handling
+
+Every **service method a controller, guard, or auth strategy calls** wraps its body in try/catch and ends with `rethrowServiceError` from `src/common/http/service-error.ts`.
+
+Do **not** wrap methods only called by other services or background pipelines (`runExtract`, `applyGeneratedLineItems`, `assignInvoice`, `CursorChatAgentService.runTurn`, ...). Their callers inspect the raw error (cancellation, `formatCursorError`, stored run failure text), and the HTTP entry point that started the work already wraps it. Pure one-line delegations (`return this.other.method(...)`) are not wrapped either.
+
+```ts
+private readonly logger = new Logger(ProjectsService.name);
+
+async getProject(projectId: string, user: AuthUser): Promise<ProjectResponseDto> {
+  try {
+    const project = await this.projectRepo.findById(projectId);
+    if (!project) throw new HttpException('Project not found', HttpStatus.NOT_FOUND);
+    return toProjectResponse(project);
+  } catch (error) {
+    rethrowServiceError(error, this.logger, `getProject projectId=${projectId} userId=${user.id}`, 'Could not load the project');
+  }
+}
+```
+
+- Expected failures: throw `new HttpException('<message>', HttpStatus.<STATUS>)` with an explicit status (`BAD_REQUEST`, `UNAUTHORIZED`, `FORBIDDEN`, `NOT_FOUND`, `CONFLICT`) and **one plain sentence** the user can act on ("Project not found", "Only workspace owners can rename a workspace"). Do not use the subclasses (`NotFoundException`, `BadRequestException`, ...) or numeric literals like `404`.
+- `rethrowServiceError` passes through `HttpException`, TypeORM `QueryFailedError` (the filter maps duplicate keys to 409), and cancellation signals (`'CANCELLED'`, `PIPELINE_CLAIM_LOST`, `AbortError`). Anything else is logged with stack and becomes a 500 (`UserFacingInternalError`) with your message, shown to users even in production.
+- The fallback message is "Could not <verb> <thing>" from the user's point of view: "Could not create the invitation", "Could not load your projects". Not "Error", "Something failed", or internal names.
+- The context argument is `'ClassName.method'`, optionally followed by ids.
+- Private helpers do not need their own try/catch.
+- Controllers never catch. `AllExceptionsFilter` builds the error envelope.
+- Never swallow errors (`catch {}` or returning `null` to hide a failure).
+- Log context as ids (`userId`, `workspaceId`, `projectId`). Never log tokens, passwords, invite tokens, or full request bodies.
+- SSE / `@RawResponse()` streaming handlers: after headers are sent, report errors as stream events using the existing SSE writers; do not rethrow.
+- The Source MCP JSON-RPC endpoint (`SourceController.handle`) is the one controller allowed to catch: protocol errors must be returned as a JSON-RPC `error` object, not an HTTP error.
+- Use `Logger` from `@nestjs/common` with `ClassName.name`.
+- Upload malware scan (`ClamAvService`): infected files → `HttpException(..., BAD_REQUEST)` with `Virus detected: <signature>`; when ClamAV is enabled and the scanner itself fails → `SERVICE_UNAVAILABLE` with a plain user sentence (fail closed). See `infra-security-clamav.mdc`.

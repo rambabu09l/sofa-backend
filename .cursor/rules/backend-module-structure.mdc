@@ -1,0 +1,119 @@
+---
+description: Folder layout and file naming inside each backend business module
+globs: src/**/*.ts
+alwaysApply: false
+---
+
+# Module folder structure
+
+## `src/` layout
+
+```
+src/
+  modules/<module>/   # business modules (auth, users, masters, ...)
+  organizations/      # organization domain (organization, member, invitation); top-level, NOT under modules/
+  infra/<adapter>/    # infrastructure adapters: redis, mail, queue, health, security, storage, kafka
+  common/             # shared decorators, dto, filters, interceptors, http helpers
+  config/             # Zod env schema + EnvService
+  database/           # TypeORM module, DataSource, BaseEntity, migrations
+  testing/            # spec fixtures (*.fixture-spec.ts)
+  app.module.ts, main.ts, bootstrap.ts
+```
+
+- A new feature with its own tables or endpoints goes in `src/modules/<module>/`. A wrapper around an external system (cache, object store, SMTP, LLM client) goes in `src/infra/`.
+- Exception: the organization domain lives in `src/organizations/` (one `OrganizationsModule`, registered in `app.module.ts` as `./organizations/organizations.module`). New organization features (e.g. member management, invitation changes) go there as sibling `<feature>/` folders, not under `src/modules/`. Ask the user before adding any other top-level domain folder under `src/`.
+- From `src/organizations/<feature>/<layer>/` import other modules through `modules/`, e.g. `../../../modules/users/service/users.service`, and shared code directly, e.g. `../../../common/http/service-error`.
+- `database/` stays at `src/database/`: the `typeorm` and migration npm scripts point at `src/database/data-source.ts` and `src/database/migrations/`.
+
+## Inside a business module
+
+Every business module uses these folders (several files per folder is normal):
+
+```
+src/modules/<module>/
+  controller/*.controller.ts
+  service/*.service.ts
+  repository/*.repository.ts
+  entity/*.entity.ts          # plus *.enums.ts for entity enums
+  dto/request/*.req.dto.ts
+  dto/response/*.res.dto.ts
+  mapper/*.mapper.ts
+  helpers/                    # prompts, parsers, SSE, export builders, pure utils
+  tests/                      # all specs — mirror source paths (never colocate with code)
+  <module>.module.ts
+```
+
+- Specs live under `tests/` mirroring source paths (`tests/service/foo.service.spec.ts`). Never colocate `*.spec.ts` next to production code. Same for `src/infra/`, `src/common/`, `src/config/` (`tests/` under each package).
+- Optional folders only where the module already needs them: `guards/` and `decorators/` (auth, permissions), `types/` (auth). Do not add other top-level folders inside a module besides `tests/` and the multi-feature layout below. If something does not fit, it is a helper.
+- Shared cross-cutting code goes in `src/common/` (`http/`, `decorators/`, `dto/`, `filters/`, `interceptors/`).
+
+## Multi-feature modules (masters, organizations)
+
+When a module owns many independent catalogs/mappings (e.g. `masters`), do **not** dump every controller/service/entity into one flat set of folders. Segregate by feature subdomain so each entity family stays together:
+
+```
+src/modules/masters/
+  masters.module.ts                 # single Nest module wiring all features
+  shared/                           # DTOs/helpers used by 2+ features only
+    dto/request/
+    dto/response/
+  <feature>/                        # one folder per master/mapping family
+    controller/
+    service/
+    repository/
+    entity/
+    enum/                           # TypeScript enums for this feature (required when any exist)
+    dto/request/
+    dto/response/
+    mapper/
+```
+
+Current masters features: `role`, `permission`, `menu`, `ticket-type`, `ticket-priority`, `role-permission-mapping`, `role-menu-mapping`.
+
+`src/organizations/` uses the same multi-feature layout (one `organizations.module.ts`, one folder per feature):
+
+```
+src/organizations/
+  organizations.module.ts
+  organization/   # controller/ service/ repository/ entity/ dto/ mapper/ enum/ helpers/
+  member/         # controller/ service/ repository/ entity/ dto/ mapper/ enum/  (list/remove members + membership checks)
+  invitation/     # controller/ service/ repository/ entity/ dto/ mapper/ enum/ helpers/
+  team/           # controller/ service/ repository/ entity/ dto/ mapper/  (teams + team members)
+```
+
+Current organizations features: `organization`, `member`, `invitation`, `team`. Other features in this folder go through `OrganizationMemberService` for membership/owner checks instead of querying `organization_members` themselves.
+
+Rules for this layout:
+- Keep one Nest `@Module` (`masters.module.ts`) at the module root; do not create a Nest module per feature unless boundaries truly split later.
+- Put only cross-feature request/response DTOs in `shared/` (e.g. list query DTOs, `base-audit.res.dto.ts`). Feature-specific DTOs stay under that feature.
+- Enums live in `<feature>/enum/<feature>.enums.ts` (e.g. `role/enum/master-role.enums.ts`). Never inline string-union scopes or seed codes in entities/DTOs — import the enum. Mapping features omit `enum/` until they need one.
+- Entities declare schema uniqueness and query indexes explicitly: `@Index('uq_…', { unique: true })` on unique columns and `@Index('ix_…', [...])` for list/FK lookup composites. Mirror every new index in a TypeORM migration.
+- Cross-feature reads inside masters (e.g. mapping service needing role/permission repos) may import sibling feature repositories **within the same masters module**. Outside masters, other modules still go through exported masters services — never import masters repositories or entities for business logic (entity relations for TypeORM joins are the documented exception).
+- Specs mirror the feature path: `tests/role/service/master-role.service.spec.ts`.
+- New master tables get a new `<feature>/` folder with the same layer folders; register the pieces in `masters.module.ts`.
+
+## Naming
+
+| Artifact | File | Class / export |
+|---|---|---|
+| Entity | `project.entity.ts` | `ProjectEntity` |
+| Repository | `project.repository.ts` | `ProjectRepository` |
+| Service | `projects.service.ts` | `ProjectsService` |
+| Controller | `projects.controller.ts` | `ProjectsController` |
+| Request DTO | `create-project.req.dto.ts` | `CreateProjectDto` |
+| Response DTO | `project.res.dto.ts` | `ProjectResponseDto` |
+| Mapper | `project.mapper.ts` | `toProjectResponse()` functions |
+| Enums (masters feature) | `enum/master-role.enums.ts` | `MasterRoleScope`, `MasterRoleCode` |
+
+### Functions and methods
+
+Names say what the function does, camelCase, verb first:
+
+- CRUD: `list`, `getById`, `create`, `update`, `remove`
+- Repository queries: `findAll`, `findById`, `findByCode`, `findActiveInWorkspace`
+- Helpers that throw: `requireById`, `assertCodeAvailable`
+- Booleans: `isActive`, `hasPermission`, `canAssign`
+- No generic or vague names (`doIt`, `handle`, `process`, `data`, `temp`, `helper`, `getData2`) and no abbreviations beyond `id`, `dto`, `jwt`, `url`.
+- Routes are kebab-case plural nouns: `@Controller('masters/ticket-types')`.
+
+Keep existing class and function names when moving files; only paths change. Update every import (including specs and `test/`) in the same change.

@@ -1,0 +1,60 @@
+---
+description: Controllers, DTOs, mappers, Swagger, response envelope, and pagination for the backend API
+globs: src/**/controller/*.ts,src/**/dto/**/*.ts,src/**/mapper/*.ts,src/**/*.controller.ts,src/**/*.dto.ts,src/**/*.mapper.ts
+alwaysApply: false
+---
+
+# API conventions
+
+## Response envelope (do not change; the frontend depends on it)
+
+Controllers return the **DTO only**. `ResponseInterceptor` wraps success and `AllExceptionsFilter` wraps errors:
+
+```json
+{ "success": true, "error": null, "data": {}, "metadata": { "message": "...", "code": null, "pagination": null, "requestId": "...", "timestamp": "...", "path": "...", "details": null } }
+```
+
+- Success message: `@ApiMessage('Project created')`.
+- Lists with paging: return `paginated(items, { page, limit, total })` from `src/common/http/paginated.ts`. Do not add paging to endpoints that return a full list today.
+- `@RawResponse()` only for files, SSE, or protocol endpoints.
+
+## Controllers
+
+- Thin: read params/body/user, call one service method, return.
+- `@ApiTags`, `@ApiOperation`, `@ApiOkEnvelope(Dto)` / `@ApiCreatedEnvelope(Dto)` on every endpoint.
+- Every endpoint documents each error status it can return with `@ApiErrorResponses(...)` (`src/common/decorators/api-error-responses.decorator.ts`), one entry per status with a description of when it happens. Cover validation/`ParseUUIDPipe` (400), every `HttpException` the service can throw, and the `rethrowServiceError` fallback (500). 401/403 come from `@ApiAuth()` and 429 from `@ApiRateLimited()`; don't repeat those.
+
+```ts
+@ApiErrorResponses(
+  { status: HttpStatus.BAD_REQUEST, description: 'Invalid fields, or the invitation has expired' },
+  { status: HttpStatus.NOT_FOUND, description: 'Invitation not found' },
+  { status: HttpStatus.INTERNAL_SERVER_ERROR, description: 'Could not create your account' },
+)
+```
+- Auth is global (`JwtAuthGuard`); use `@Public()` to opt out, `@RequirePermission('KEY')` for permission checks, `@CurrentUser()` for the caller.
+- Validate ids with `ParseUUIDPipe`.
+
+## DTOs
+
+- Request DTOs: `class-validator` + `class-transformer` on every field, `@ApiProperty` / `@ApiPropertyOptional`.
+- **Every** `class-validator` decorator on a request/query DTO field must include an explicit `{ message: '...' }`. No bare `@IsInt()`, `@IsString()`, `@MinLength(1)`, `@MaxLength(n)`, `@Min(n)`, `@Max(n)`, `@IsBoolean()`, `@IsEnum(...)`, `@Matches(...)`, etc. `@IsOptional()` and `@ValidateIf(...)` do not need a message.
+- Messages are plain, field-specific, and actionable (e.g. `'sortOrder must be a whole number'`, `'code must be at most 64 characters'`, `'scope must be SYSTEM or ORGANIZATION'`). Never rely on the default class-validator wording.
+- Response DTOs: exact client shape, dates as ISO strings. Never return entities.
+- Do not change request or response field names without updating the frontend.
+
+```ts
+// BAD
+@IsInt()
+@Min(0)
+sortOrder?: number;
+
+// GOOD
+@IsInt({ message: 'sortOrder must be a whole number' })
+@Min(0, { message: 'sortOrder cannot be negative' })
+sortOrder?: number;
+```
+
+## Mappers
+
+- Pure functions in `mapper/`: `toXxxResponse(entity, ...)`, `toXxxEntity(dto, ...)`.
+- Services call mappers; no inline object mapping in services or controllers.
